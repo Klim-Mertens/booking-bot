@@ -70,8 +70,13 @@ class RateLimiter:
         self.limit, self.window = limit, window
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
+    MAX_KEYS = 50_000   # память не растёт бесконечно от потока новых пользователей
+
     def allow(self, key: str) -> bool:
         now = time.monotonic()
+        if len(self._hits) > self.MAX_KEYS:
+            for k in [k for k, q in self._hits.items() if not q or now - q[-1] > self.window]:
+                del self._hits[k]
         q = self._hits[key]
         while q and now - q[0] > self.window:
             q.popleft()
