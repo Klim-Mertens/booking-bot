@@ -37,9 +37,22 @@ class MaxApiError(Exception):
         self.status, self.code = status, code
 
 
-def callback_button(text: str, payload: str) -> dict[str, Any]:
-    # payload — до 256 символов; как и в Telegram, это недоверенные данные
-    return {"type": "callback", "text": text[:64], "payload": payload}
+def callback_button(text: str, payload: str, intent: str | None = None) -> dict[str, Any]:
+    # payload — до 256 символов; как и в Telegram, это недоверенные данные.
+    # intent: "positive" (зелёная) / "negative" (красная) / по умолчанию — обычная.
+    b: dict[str, Any] = {"type": "callback", "text": text[:64], "payload": payload}
+    if intent:
+        b["intent"] = intent
+    return b
+
+
+def clipboard_button(text: str, payload: str) -> dict[str, Any]:
+    """Кнопка «скопировать»: текст попадает в буфер обмена пользователя."""
+    return {"type": "clipboard", "text": text[:64], "payload": payload[:256]}
+
+
+def link_button(text: str, url: str) -> dict[str, Any]:
+    return {"type": "link", "text": text[:64], "url": url}
 
 
 def contact_button(text: str) -> dict[str, Any]:
@@ -69,11 +82,16 @@ class MaxClient:
                 raise MaxApiError(resp.status, code)
             return data
 
-    async def send(self, user_id: int, text: str, buttons: list[list[dict]] | None = None) -> Any:
+    @staticmethod
+    def message_body(text: str, buttons: list[list[dict]] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {"text": text[:4000], "format": "html", "attachments": []}
         if buttons:
             body["attachments"].append(keyboard(buttons))
-        return await self._request("POST", "/messages", params={"user_id": user_id}, json=body)
+        return body
+
+    async def send(self, user_id: int, text: str, buttons: list[list[dict]] | None = None) -> Any:
+        return await self._request("POST", "/messages", params={"user_id": user_id},
+                                   json=self.message_body(text, buttons))
 
     async def me(self) -> dict[str, Any]:
         """Кто я: проверка токена при запуске."""
@@ -84,8 +102,15 @@ class MaxClient:
         data = await self._request("GET", "/subscriptions", timeout=15)
         return (data or {}).get("subscriptions") or []
 
-    async def answer_callback(self, callback_id: str, notification: str | None = None) -> Any:
-        body = {"notification": notification} if notification else {}
+    async def answer_callback(self, callback_id: str, notification: str | None = None,
+                              message: dict[str, Any] | None = None) -> Any:
+        """Ответ на нажатие. message — заменить сообщение с кнопкой новым содержимым
+        (экран меняется на месте, чат не засоряется), notification — всплывающий текст."""
+        body: dict[str, Any] = {}
+        if notification:
+            body["notification"] = notification[:200]
+        if message:
+            body["message"] = message
         return await self._request("POST", "/answers", params={"callback_id": callback_id}, json=body)
 
     async def get_updates(self, marker: int | None, timeout: int = 30) -> dict[str, Any]:

@@ -7,6 +7,7 @@ import base64
 import logging
 import os
 
+from adapters import notify
 from adapters.max.bot import MaxBookingBot
 from adapters.max.client import MaxClient
 from core.booking import BookingService
@@ -21,7 +22,8 @@ async def main() -> None:
     cipher = PiiCipher(require_env("PII_ENC_KEY").encode(),
                        base64.urlsafe_b64decode(require_env("PII_HMAC_KEY")))
     svc = BookingService(catalog, Storage(os.environ.get("DB_PATH", "bookings.db")), cipher, biz.tz)
-    bot = MaxBookingBot(MaxClient(require_env("MAX_TOKEN")), svc, biz, admin_ids("MAX_ADMIN_IDS"))
+    bot = MaxBookingBot(MaxClient(require_env("MAX_TOKEN")), svc, biz, admin_ids("MAX_ADMIN_IDS"),
+                        extra_notify=notify.from_env(dict(os.environ), for_platform="max"))
     await asyncio.gather(bot.poll(), bot.reminders())
 
 

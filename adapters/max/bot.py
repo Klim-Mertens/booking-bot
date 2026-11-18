@@ -10,13 +10,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html import escape
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from adapters.common import RateLimiter, booking_text, human_dt, offered_days, parse_widget_request
 from core.booking import BookingError, BookingService, mark_reminder_sent, reminders_due
 from core.config import Business
+from core.crypto import normalize_phone
 
-from .client import MaxApiError, MaxClient, callback_button as btn, contact_button
+from .client import MaxApiError, MaxClient, callback_button as btn, clipboard_button, contact_button, link_button
 
 log = logging.getLogger("booking.max")
 SESSION_TTL = 30 * 60          # незаконченная запись забывается через 30 минут
@@ -36,10 +37,17 @@ class Session:
 
 
 class MaxBookingBot:
-    def __init__(self, client: MaxClient, svc: BookingService, biz: Business, admins: frozenset[int]) -> None:
+    def __init__(self, client: MaxClient, svc: BookingService, biz: Business, admins: frozenset[int],
+                 extra_notify: Callable[[str], Awaitable[None]] | None = None) -> None:
         self.api, self.svc, self.biz, self.admins = client, svc, biz, admins
         self.sessions: dict[int, Session] = {}
         self.limiter = RateLimiter()
+        # Уведомить владельца и в другом мессенджере (например, админов в Telegram).
+        self.extra_notify = extra_notify
+        # Первый экран в ответ на нажатие кнопки не шлём новым сообщением, а подменяем
+        # им сообщение с кнопками (POST /answers с message) — чат не засоряется.
+        self._edit_slot = False
+        self._pending: dict[str, Any] | None = None
 
     def now(self) -> datetime:
         return datetime.now(self.biz.tz)
@@ -71,8 +79,20 @@ class MaxBookingBot:
             if not self.limiter.allow(uid(user_id)):
                 await self.api.answer_callback(cb["callback_id"], "Слишком часто, подождите минуту")
                 return
-            note = await self.on_callback(user_id, str(cb.get("payload") or "")[:256])
-            await self.api.answer_callback(cb["callback_id"], note)
+            self._edit_slot, self._pending = True, None
+            try:
+                note = await self.on_callback(user_id, str(cb.get("payload") or "")[:256])
+            finally:
+                message, self._edit_slot, self._pending = self._pending, False, None
+            await self.api.answer_callback(cb["callback_id"], note, message)
+
+    async def show(self, user_id: int, text: str, buttons: list[list[dict]] | None = None) -> None:
+        """Показать следующий шаг: на месте старого экрана, если это ответ на кнопку."""
+        if self._edit_slot:
+            self._edit_slot = False
+            self._pending = self.api.message_body(text, buttons)
+        else:
+            await self.api.send(user_id, text, buttons)
 
     # ------------------------------------------------------------ меню
 
@@ -97,6 +117,11 @@ class MaxBookingBot:
             if not phone:
                 await self.api.send(user_id, "Отправьте, пожалуйста, свой номер.")
                 return
+            try:
+                normalize_phone(phone)        # проверяем сразу, а не после «Проверьте данные»
+            except ValueError:
+                await self.api.send(user_id, "Не похоже на номер телефона. Напишите, например, +7 999 123-45-67.")
+                return
             s.data["phone"], s.step = phone, "confirm"
             d = s.data
             svc_ = self.svc.catalog.services[d["service"]]
@@ -105,7 +130,7 @@ class MaxBookingBot:
                 f"Проверьте данные:\n<b>{escape(svc_.title)}</b> · {svc_.price_rub} ₽\n"
                 f"Мастер: {escape(self.svc.catalog.masters[d['master']].name)}\n"
                 f"Когда: {escape(human_dt(datetime.fromisoformat(d['start'])))}\nИмя: {escape(d['name'])}",
-                [[btn("✅ Записаться", "confirm"), btn("Отмена", "abort")]],
+                [[btn("✅ Записаться", "confirm", "positive"), btn("Отмена", "abort", "negative")]],
             )
         else:
             await self.menu(user_id, greet=s.step == "idle" and text.lower() in ("/start", "start", "старт"))
@@ -133,13 +158,16 @@ class MaxBookingBot:
 
         if payload == "contacts":
             await self.api.send(user_id, f"<b>{escape(self.biz.name)}</b>\n{escape(self.biz.address)}\n"
-                                         f"{escape(self.biz.phone)}")
+                                         f"{escape(self.biz.phone)}",
+                                [[clipboard_button("📋 Скопировать адрес", self.biz.address)],
+                                 [clipboard_button("📋 Скопировать телефон", self.biz.phone)]])
         elif payload == "my":
             items = svc.client_bookings(uid(user_id), now)
             if not items:
                 await self.api.send(user_id, "Активных записей нет.")
             for b in items:
-                await self.api.send(user_id, escape(booking_text(svc, b)), [[btn("Отменить запись", f"cnl:{b.id}")]])
+                await self.api.send(user_id, escape(booking_text(svc, b)),
+                                    [[btn("Отменить запись", f"cnl:{b.id}", "negative")]])
         elif payload == "book":
             self.sessions[user_id] = s = Session(step="choosing")
             await self.api.send(user_id, "Выберите услугу:",
@@ -149,7 +177,7 @@ class MaxBookingBot:
             if s.step != "choosing" or not masters:
                 return "Начните запись заново"
             s.data["service"] = m.group(1)
-            await self.api.send(user_id, "Выберите мастера:", [[btn(x.name, f"mst:{x.id}")] for x in masters])
+            await self.show(user_id, "Выберите мастера:", [[btn(x.name, f"mst:{x.id}")] for x in masters])
         elif m := re.fullmatch(rf"mst:({_ID})", payload):
             master = svc.catalog.masters.get(m.group(1))
             if s.step != "choosing" or master is None or s.data.get("service") not in master.service_ids:
@@ -158,8 +186,8 @@ class MaxBookingBot:
             s.data.update(master=master.id, days=[d.isoformat() for d in days])
             rows = [[btn(human_dt(datetime.combine(d, datetime.min.time())).rsplit(",", 1)[0], f"day:{i}")]
                     for i, d in enumerate(days) if svc.available_slots(s.data["service"], master.id, d, now)]
-            await self.api.send(user_id, "Выберите день:" if rows else "Свободного времени нет. Позвоните нам: "
-                                + escape(self.biz.phone), rows or None)
+            await self.show(user_id, "Выберите день:" if rows else "Свободного времени нет. Позвоните нам: "
+                            + escape(self.biz.phone), rows or None)
         elif m := re.fullmatch(r"day:(\d{1,2})", payload):
             days = [date.fromisoformat(x) for x in s.data.get("days", [])]
             idx = int(m.group(1))
@@ -167,7 +195,9 @@ class MaxBookingBot:
                 return "Начните запись заново"
             slots = svc.available_slots(s.data["service"], s.data["master"], days[idx], now)
             buttons = [btn(f"{t:%H:%M}", f"tm:{idx}:{t.hour * 60 + t.minute}") for t in slots]
-            await self.api.send(user_id, "Выберите время:", [buttons[i:i + 4] for i in range(0, len(buttons), 4)])
+            rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+            rows.append([btn("← Другой день", f"mst:{s.data['master']}")])
+            await self.show(user_id, "Выберите время:" if buttons else "На этот день время уже заняли.", rows)
         elif m := re.fullmatch(r"tm:(\d{1,2}):(\d{1,4})", payload):
             if s.step != "choosing":
                 return "Начните запись заново"
@@ -176,17 +206,20 @@ class MaxBookingBot:
             if start is None or start not in svc.available_slots(s.data["service"], s.data["master"], start.date(), now):
                 return "Время недоступно, выберите другое"
             s.data["start"], s.step = start.isoformat(), "consent"
-            await self.api.send(
+            consent_rows = [[btn("✅ Согласен", "consent", "positive"), btn("Отмена", "abort", "negative")]]
+            if self.biz.privacy_url.startswith("https://"):
+                consent_rows.append([link_button("📄 Политика обработки данных", self.biz.privacy_url)])
+            await self.show(
                 user_id,
                 f"Вы выбрали: <b>{escape(human_dt(start))}</b>\n\nДля записи нужны имя и телефон. Нажимая "
                 f"«Согласен», вы даёте согласие на обработку персональных данных по политике: "
                 f"{escape(self.biz.privacy_url)}\nДанные хранятся зашифрованными и удаляются через "
                 f"{self.biz.keep_days} дней после визита.",
-                [[btn("✅ Согласен", "consent"), btn("Отмена", "abort")]],
+                consent_rows,
             )
         elif payload == "consent" and s.step == "consent":
             s.data["consent"], s.step = True, "name"
-            await self.api.send(user_id, "Как вас зовут?")
+            await self.show(user_id, "Спасибо! Как вас зовут? Напишите имя в ответ.")
         elif payload == "confirm" and s.step == "confirm":
             d = s.data
             try:
@@ -197,26 +230,30 @@ class MaxBookingBot:
             except BookingError as e:
                 if "телефона" in str(e):
                     s.step = "phone"
-                    await self.api.send(user_id, "Неверный формат телефона. Напишите номер ещё раз.")
+                    await self.show(user_id, "Неверный формат телефона. Напишите номер ещё раз.")
                 else:
                     self.sessions.pop(user_id, None)
-                    await self.api.send(user_id, f"{escape(str(e))}.", [[btn("📅 Записаться", "book")]])
+                    await self.show(user_id, f"{escape(str(e))}.", [[btn("📅 Записаться", "book")]])
                 return None
             self.sessions.pop(user_id, None)     # телефон больше не держим в памяти
-            await self.api.send(user_id, f"✅ Вы записаны!\n{escape(booking_text(svc, b))}\n\n"
-                                         "Напомним за сутки и за 2 часа.")
+            await self.show(user_id, f"✅ Вы записаны!\n{escape(booking_text(svc, b))}\n\n"
+                                     "Напомним за сутки и за 2 часа.",
+                            [[btn("Отменить запись", f"cnl:{b.id}", "negative")],
+                             [btn("🏠 В меню", "menu")]])
             await self.notify_admins(f"🆕 Новая запись #{b.id} (MAX)\n{escape(booking_text(svc, b))}\n"
                                      f"Клиент: {escape(b.client_name)}",
-                                     [[btn("📞 Телефон", f"aph:{b.id}"), btn("Отменить", f"acn:{b.id}")]])
+                                     [[btn("📞 Телефон", f"aph:{b.id}"), btn("Отменить", f"acn:{b.id}", "negative")]])
         elif payload == "abort":
             self.sessions.pop(user_id, None)
-            await self.api.send(user_id, "Запись отменена.")
+            await self.show(user_id, "Запись отменена.", [[btn("🏠 В меню", "menu")]])
+        elif payload == "menu":
+            await self.menu(user_id)
         elif m := re.fullmatch(r"cnl:(\d{1,10})", payload):
             try:
                 b = svc.cancel(int(m.group(1)), uid(user_id))   # проверка владельца внутри
             except BookingError as e:
                 return str(e)
-            await self.api.send(user_id, f"❌ Отменено: {escape(booking_text(svc, b))}")
+            await self.show(user_id, f"❌ Отменено: {escape(booking_text(svc, b))}")
             await self.notify_admins(f"❌ Клиент отменил запись #{b.id}\n{escape(booking_text(svc, b))}")
         elif m := re.fullmatch(r"aph:(\d{1,10})", payload):
             if user_id not in self.admins:
@@ -234,7 +271,7 @@ class MaxBookingBot:
                 b = svc.cancel(int(m.group(1)), uid(user_id), is_admin=True)
             except BookingError as e:
                 return str(e)
-            await self.api.send(user_id, f"❌ Отменено: #{b.id}")
+            await self.show(user_id, f"❌ Отменено администратором: #{b.id}\n{escape(booking_text(svc, b))}")
             if b.client_user_id.startswith("max:"):
                 await self.safe_send(int(b.client_user_id[4:]),
                                      f"К сожалению, ваша запись отменена:\n{escape(booking_text(svc, b))}\n"
@@ -244,6 +281,11 @@ class MaxBookingBot:
     async def notify_admins(self, text: str, buttons: list[list[dict]] | None = None) -> None:
         for admin_id in self.admins:
             await self.safe_send(admin_id, text, buttons)
+        if self.extra_notify:
+            try:
+                await self.extra_notify(text)
+            except Exception:  # noqa: BLE001 — сбой второго мессенджера не должен ломать запись
+                log.warning("cross-platform notify failed")
 
     async def safe_send(self, user_id: int, text: str, buttons: list[list[dict]] | None = None) -> None:
         try:
@@ -305,6 +347,8 @@ class MaxBookingBot:
                                          f"⏰ Напоминаем: {when} у вас запись\n{escape(booking_text(self.svc, b))}",
                                          [[btn("Отменить запись", f"cnl:{b.id}")]])
                     mark_reminder_sent(self.svc, b.id, kind)
+                # 152-ФЗ: старые записи удаляем и тогда, когда запущен только MAX-бот.
+                self.svc.purge_old(current, self.biz.keep_days)
             except Exception:  # noqa: BLE001
                 log.exception("reminder loop error")
             await asyncio.sleep(60)

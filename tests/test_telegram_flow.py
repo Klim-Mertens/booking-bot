@@ -148,3 +148,56 @@ def test_widget_request_without_flow_is_rejected(env):
     asyncio.run(feed(bot, dp, widget("s:0:600")))
     ans = [c for c in session.calls if c.__api_method__ == "answerWidgetQuery"][-1]
     assert "err" in json.loads(ans.data)
+
+
+def test_booking_ui_uses_new_bot_api_features(env):
+    svc, biz, session, bot, dp = env
+
+    async def scenario():
+        await feed(bot, dp, msg("📅 Записаться"))
+        await feed(bot, dp, cb("svc:haircut"))
+        await feed(bot, dp, cb("mst:anton"))
+        idx, slot = first_free(svc, biz)
+        await feed(bot, dp, widget(f"s:{idx}:{slot.hour * 60 + slot.minute}"))
+        consent = [c for c in session.calls if "Вы выбрали" in str(getattr(c, "text", ""))][-1]
+        assert f'<tg-time unix="{int(slot.timestamp())}">' in consent.text        # date_time
+        styles = [b.style for row in consent.reply_markup.inline_keyboard for b in row]
+        assert styles == ["success", "danger"]                                     # цветные кнопки
+        await feed(bot, dp, cb("consent"))
+        await feed(bot, dp, msg("Иван"))
+        await feed(bot, dp, msg("перезвоните"))                                    # не телефон
+        assert "Не похоже на номер" in session.calls[-1].text
+        await feed(bot, dp, msg("+7 999 123-45-67"))
+        await feed(bot, dp, cb("confirm"))
+        done = [c for c in session.calls if "Вы записаны" in str(getattr(c, "text", ""))][-1]
+        assert done.message_effect_id == "5046509860389126442"                      # конфетти
+
+    asyncio.run(scenario())
+
+
+def test_busy_days_are_disabled_buttons():
+    from adapters.telegram.bot import ikb
+    kb = ikb([[("Пн 1 — занято", None)], [("Вт 2", "day:1", "primary")]])
+    raw = json.loads(kb.model_dump_json(exclude_none=True))
+    assert raw["inline_keyboard"][0][0] == {"text": "Пн 1 — занято", "disabled": {}}
+    assert raw["inline_keyboard"][1][0]["style"] == "primary"
+
+
+def test_widget_answered_even_on_internal_error(env, monkeypatch):
+    svc, biz, session, bot, dp = env
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    async def scenario():
+        await feed(bot, dp, msg("📅 Записаться"))
+        await feed(bot, dp, cb("svc:haircut"))
+        await feed(bot, dp, cb("mst:anton"))
+        monkeypatch.setattr(svc, "available_slots", boom)
+        try:
+            await feed(bot, dp, widget("s:0:600"))
+        except RuntimeError:
+            pass
+        assert session.names()[-1] == "answerWidgetQuery"
+
+    asyncio.run(scenario())

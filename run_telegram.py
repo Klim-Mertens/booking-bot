@@ -14,6 +14,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from adapters import notify
 from adapters.telegram.bot import build, reminder_loop
 from core.booking import BookingService
 from core.config import admin_ids, load_config, require_env
@@ -28,7 +29,7 @@ async def main() -> None:
                        base64.urlsafe_b64decode(require_env("PII_HMAC_KEY")))
     svc = BookingService(catalog, Storage(os.environ.get("DB_PATH", "bookings.db")), cipher, biz.tz)
     bot = Bot(require_env("TG_TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build(svc, biz, admin_ids())
+    dp = build(svc, biz, admin_ids(), extra_notify=notify.from_env(dict(os.environ), for_platform="telegram"))
     asyncio.create_task(reminder_loop(bot, svc, biz))
     # widget_query нужно перечислить явно, иначе Telegram его не пришлёт.
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "widget_query"])

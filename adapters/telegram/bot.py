@@ -23,13 +23,16 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                           Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, TelegramObject, Update)
+from aiogram.types import (CallbackQuery, CopyTextButton, DisabledButton, InlineKeyboardButton,
+                           InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup,
+                           ReplyKeyboardRemove, TelegramObject, Update)
 
 from adapters.common import (RateLimiter, booking_text, calendar_state, human_dt, offered_days,
                              parse_widget_request)
 from core.booking import BookingError, BookingService, mark_reminder_sent, reminders_due
 from core.config import Business
+from core.crypto import normalize_phone
+from core.models import Booking
 
 from .methods import AnswerWidgetQuery, EditMessageWidgetData, SendWidget
 
@@ -37,6 +40,10 @@ log = logging.getLogger("booking.tg")
 WIDGET_HTML = (Path(__file__).resolve().parents[2] / "widgets" / "calendar.html").read_text("utf-8")
 
 BTN_BOOK, BTN_MY, BTN_CONTACTS = "📅 Записаться", "🗂 Мои записи", "📍 Контакты"
+# Эффект «конфетти» для сообщения об успешной записи (работает в личных чатах).
+EFFECT_CONFETTI = "5046509860389126442"
+# Цвет кнопок (Bot API 9.4): success — зелёная, danger — красная, primary — синяя.
+OK, DANGER, PRIMARY = "success", "danger", "primary"
 
 
 class Flow(StatesGroup):
@@ -52,14 +59,29 @@ def uid(user_id: int) -> str:
     return f"tg:{user_id}"
 
 
-def ikb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t, callback_data=d) for t, d in row] for row in rows
-    ])
+def ikb(rows: list[list[tuple]]) -> InlineKeyboardMarkup:
+    """Кнопки из кортежей (текст, callback_data[, цвет]). callback_data=None — неактивная кнопка."""
+    def make(t: str, d: str | None, style: str | None = None) -> InlineKeyboardButton:
+        if d is None:
+            return InlineKeyboardButton(text=t, disabled=DisabledButton())   # Bot API 10.3
+        return InlineKeyboardButton(text=t, callback_data=d, style=style)
+    return InlineKeyboardMarkup(inline_keyboard=[[make(*b) for b in row] for row in rows])
+
+
+def tg_when(dt: datetime) -> str:
+    """Дата-время сущностью date_time (Bot API 9.5): Telegram покажет её в часовом
+    поясе пользователя. Внутри тега — обычный текст на случай старого клиента."""
+    return f'<tg-time unix="{int(dt.timestamp())}">{escape(human_dt(dt))}</tg-time>'
+
+
+def tg_booking_text(svc: BookingService, b: Booking) -> str:
+    """booking_text, но с «живой» датой. Возвращает готовый HTML."""
+    first, _, rest = booking_text(svc, b).partition("\n")
+    return f"{tg_when(b.start_at.astimezone(svc.tz))}\n{escape(rest)}"
 
 
 def main_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_BOOK)],
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_BOOK, style=PRIMARY)],
                                          [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_CONTACTS)]],
                                resize_keyboard=True)
 
@@ -80,7 +102,8 @@ class RateLimitMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatcher:
+def build(svc: BookingService, biz: Business, admins: frozenset[int],
+          extra_notify: Callable[[str], Awaitable[None]] | None = None) -> Dispatcher:
     dp = Dispatcher()
     router = Router()
     limiter = RateLimiter()
@@ -100,7 +123,13 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
 
     @router.message(F.text == BTN_CONTACTS)
     async def contacts(m: Message) -> None:
-        await m.answer(f"<b>{escape(biz.name)}</b>\n{escape(biz.address)}\n{escape(biz.phone)}")
+        await m.answer(f"<b>{escape(biz.name)}</b>\n{escape(biz.address)}\n{escape(biz.phone)}",
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                           [InlineKeyboardButton(text="📋 Скопировать адрес",
+                                                 copy_text=CopyTextButton(text=biz.address[:256]))],
+                           [InlineKeyboardButton(text="📋 Скопировать телефон",
+                                                 copy_text=CopyTextButton(text=biz.phone[:256]))],
+                       ]))
 
     @router.message(F.text == BTN_MY)
     async def my_bookings(m: Message) -> None:
@@ -109,8 +138,8 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
             await m.answer("Активных записей нет.", reply_markup=main_kb())
             return
         for b in items:
-            await m.answer(escape(booking_text(svc, b)),
-                           reply_markup=ikb([[("Отменить запись", f"cnl:{b.id}")]]))
+            await m.answer(tg_booking_text(svc, b),
+                           reply_markup=ikb([[("Отменить запись", f"cnl:{b.id}", DANGER)]]))
 
     @router.callback_query(F.data.regexp(r"^cnl:\d{1,10}$"))
     async def cancel(c: CallbackQuery) -> None:
@@ -119,7 +148,7 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
         except BookingError as e:
             await c.answer(str(e), show_alert=True)
             return
-        await c.message.edit_text(f"❌ Отменено: {escape(booking_text(svc, b))}")
+        await c.message.edit_text(f"❌ Отменено: {tg_booking_text(svc, b)}")
         await notify_admins(c.bot, f"❌ Клиент отменил запись #{b.id}\n{escape(booking_text(svc, b))}")
         await c.answer()
 
@@ -180,11 +209,15 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
 
     async def send_days(msg: Message, s: BookingService, service_id: str, master_id: str,
                         days: list[date]) -> None:
-        rows = []
+        rows, any_free = [], False
         for i, d in enumerate(days):
+            label = human_dt(datetime.combine(d, datetime.min.time())).rsplit(",", 1)[0]
             if s.available_slots(service_id, master_id, d, now()):
-                rows.append([(human_dt(datetime.combine(d, datetime.min.time())).rsplit(",", 1)[0], f"day:{i}")])
-        if not rows:
+                rows.append([(label, f"day:{i}")])
+                any_free = True
+            else:
+                rows.append([(f"{label} — занято", None)])   # видно, но нажать нельзя
+        if not any_free:
             await msg.answer("Свободного времени на ближайшие дни нет. Позвоните нам: " + escape(biz.phone))
             return
         await msg.answer("Выберите день:", reply_markup=ikb(rows))
@@ -200,7 +233,9 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
         slots = svc.available_slots(data["service"], data["master"], days[idx], now())
         buttons = [(f"{s:%H:%M}", f"tm:{idx}:{s.hour * 60 + s.minute}") for s in slots]
         rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
-        await c.message.edit_text("Выберите время:", reply_markup=ikb(rows or [[("Назад", "nowidget")]]))
+        rows.append([("← Другой день", "nowidget")])
+        await c.message.edit_text("Выберите время:" if buttons else "На этот день время уже заняли.",
+                                  reply_markup=ikb(rows))
         await c.answer()
 
     @router.callback_query(Flow.choosing, F.data.regexp(r"^tm:\d{1,2}:\d{1,4}$"))
@@ -223,11 +258,11 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
         await state.set_state(Flow.consent)
         await bot.send_message(
             chat_id,
-            f"Вы выбрали: <b>{escape(human_dt(start_at))}</b>\n\n"
+            f"Вы выбрали: <b>{tg_when(start_at)}</b>\n\n"
             "Для записи нужны имя и телефон. Нажимая «Согласен», вы даёте согласие на обработку "
             f"персональных данных по <a href=\"{escape(biz.privacy_url)}\">политике</a>. "
             f"Данные хранятся в зашифрованном виде и удаляются через {biz.keep_days} дней после визита.",
-            reply_markup=ikb([[("✅ Согласен", "consent"), ("Отмена", "abort")]]),
+            reply_markup=ikb([[("✅ Согласен", "consent", OK), ("Отмена", "abort", DANGER)]]),
             disable_web_page_preview=True,
         )
         return True, ""
@@ -245,15 +280,19 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
         user_id = int(wq["from"]["id"])
         chat_id = int(wq.get("chat", {}).get("id", user_id))
         answer: dict[str, Any]
-        if not limiter.allow(uid(user_id)):
-            answer = {"err": "Слишком часто, подождите"}
-        else:
-            state = dp.fsm.get_context(bot=bot, chat_id=chat_id, user_id=user_id)
-            ok, err = await on_slot(bot, state, str(wq.get("data", ""))[:64], chat_id)
-            answer = {"ok": 1} if ok else {"err": err}
-            await refresh_widget(bot, state, chat_id, chosen=ok)
-        await bot(AnswerWidgetQuery(widget_query_id=str(wq["id"]),
-                                    data=json.dumps(answer, ensure_ascii=False)))
+        answer: dict[str, Any] = {"err": "Ошибка, попробуйте ещё раз"}
+        try:
+            if not limiter.allow(uid(user_id)):
+                answer = {"err": "Слишком часто, подождите"}
+            else:
+                state = dp.fsm.get_context(bot=bot, chat_id=chat_id, user_id=user_id)
+                ok, err = await on_slot(bot, state, str(wq.get("data", ""))[:64], chat_id)
+                answer = {"ok": 1} if ok else {"err": err}
+                await refresh_widget(bot, state, chat_id, chosen=ok)
+        finally:
+            # Ответить нужно в любом случае, иначе виджет «зависнет» в ожидании.
+            await bot(AnswerWidgetQuery(widget_query_id=str(wq["id"]),
+                                        data=json.dumps(answer, ensure_ascii=False)))
         return None
 
     async def refresh_widget(bot: Bot, state: FSMContext, chat_id: int, chosen: bool) -> None:
@@ -314,6 +353,11 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
             phone = m.contact.phone_number
         else:
             phone = m.text
+        try:
+            normalize_phone(phone)          # проверяем сразу, а не после «Проверьте данные»
+        except ValueError:
+            await m.answer("Не похоже на номер телефона. Напишите, например, +7 999 123-45-67.")
+            return
         await state.update_data(phone=phone)
         await state.set_state(Flow.confirm)
         data = await state.get_data()
@@ -322,9 +366,9 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
         await m.answer(
             f"<b>{escape(s.title)}</b> · {s.price_rub} ₽\n"
             f"Мастер: {escape(svc.catalog.masters[data['master']].name)}\n"
-            f"Когда: {escape(human_dt(datetime.fromisoformat(data['start'])))}\n"
+            f"Когда: {tg_when(datetime.fromisoformat(data['start']))}\n"
             f"Имя: {escape(data['name'])}",
-            reply_markup=ikb([[("✅ Записаться", "confirm"), ("Отмена", "abort")]]),
+            reply_markup=ikb([[("✅ Записаться", "confirm", OK), ("Отмена", "abort", DANGER)]]),
         )
 
     @router.callback_query(Flow.confirm, F.data == "confirm")
@@ -345,12 +389,17 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
             await c.answer()
             return
         await state.clear()   # телефон больше не держим в памяти FSM
-        await c.message.edit_text(f"✅ Вы записаны!\n{escape(booking_text(svc, b))}\n\n"
-                                  "Напомним за сутки и за 2 часа.")
-        await c.message.answer("Чем ещё помочь?", reply_markup=main_kb())
+        await c.message.edit_text(f"Запись #{b.id} подтверждена.")
+        try:
+            # Отдельное сообщение — чтобы показать эффект «конфетти» (он есть только у новых сообщений).
+            await c.message.answer(f"✅ Вы записаны!\n{tg_booking_text(svc, b)}\n\nНапомним за сутки и за 2 часа.",
+                                   message_effect_id=EFFECT_CONFETTI, reply_markup=main_kb())
+        except TelegramBadRequest:
+            await c.message.answer(f"✅ Вы записаны!\n{tg_booking_text(svc, b)}\n\nНапомним за сутки и за 2 часа.",
+                                   reply_markup=main_kb())
         await notify_admins(c.bot, f"🆕 Новая запись #{b.id}\n{escape(booking_text(svc, b))}\n"
                                    f"Клиент: {escape(b.client_name)}",
-                            ikb([[("📞 Показать телефон", f"aph:{b.id}"), ("Отменить", f"acn:{b.id}")]]))
+                            ikb([[("📞 Показать телефон", f"aph:{b.id}"), ("Отменить", f"acn:{b.id}", DANGER)]]))
         await c.answer()
 
     # ---------------------------------------------------------- админ
@@ -364,6 +413,11 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
                 await bot.send_message(admin_id, text, reply_markup=markup)
             except TelegramAPIError:
                 log.warning("cannot notify admin")  # без ID и текста в логе
+        if extra_notify:
+            try:
+                await extra_notify(text)            # копия админам в MAX
+            except Exception:  # noqa: BLE001
+                log.warning("cross-platform notify failed")
 
     @router.message(Command("today"))
     async def today(m: Message) -> None:
@@ -375,7 +429,7 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int]) -> Dispatc
             await m.answer("Сегодня записей нет.")
         for b in items:
             await m.answer(f"#{b.id} {escape(booking_text(svc, b))}\nКлиент: {escape(b.client_name)}",
-                           reply_markup=ikb([[("📞 Телефон", f"aph:{b.id}"), ("Отменить", f"acn:{b.id}")]]))
+                           reply_markup=ikb([[("📞 Телефон", f"aph:{b.id}"), ("Отменить", f"acn:{b.id}", DANGER)]]))
 
     @router.callback_query(F.data.regexp(r"^aph:\d{1,10}$"))
     async def admin_phone(c: CallbackQuery) -> None:
@@ -425,8 +479,8 @@ async def reminder_loop(bot: Bot, svc: BookingService, biz: Business) -> None:
                 when = "завтра" if kind == "24h" else "через 2 часа"
                 try:
                     await bot.send_message(int(b.client_user_id[3:]),
-                                           f"⏰ Напоминаем: {when} у вас запись\n{escape(booking_text(svc, b))}",
-                                           reply_markup=ikb([[("Отменить запись", f"cnl:{b.id}")]]))
+                                           f"⏰ Напоминаем: {when} у вас запись\n{tg_booking_text(svc, b)}",
+                                           reply_markup=ikb([[("Отменить запись", f"cnl:{b.id}", DANGER)]]))
                 except TelegramAPIError:
                     pass
                 mark_reminder_sent(svc, b.id, kind)
