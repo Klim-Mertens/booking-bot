@@ -255,6 +255,7 @@ class MaxBookingBot:
 
     async def poll(self) -> None:
         """Long polling. Для продакшена MAX рекомендует webhook (только HTTPS)."""
+        await self.self_check()
         marker: int | None = None
         while True:
             try:
@@ -265,9 +266,32 @@ class MaxBookingBot:
                         await self.handle(upd)
                     except Exception:  # noqa: BLE001 — одна плохая запись не должна ронять бота
                         log.exception("update handling failed")
-            except (MaxApiError, asyncio.TimeoutError, OSError) as e:
-                log.warning("polling error: %s", type(e).__name__)
+            except MaxApiError as e:
+                log.warning("polling error: %s", e)       # статус и код, без токена
                 await asyncio.sleep(3)
+            except (asyncio.TimeoutError, OSError) as e:
+                log.warning("polling error: %s: %s", type(e).__name__, e)
+                await asyncio.sleep(3)
+
+    async def self_check(self) -> None:
+        """Понятная диагностика при запуске вместо молчания."""
+        try:
+            me = await self.api.me()
+        except MaxApiError as e:
+            if e.status == 401:
+                raise SystemExit("MAX отклонил токен (401). Скопируйте MAX_TOKEN заново: "
+                                 "business.max.ru → Чат-боты → ⋮ → Настройки.") from None
+            raise
+        except OSError as e:
+            raise SystemExit(f"Нет соединения с MAX: {e}. Проверьте интернет и VPN.") from None
+        log.info("MAX: бот %s (id %s) запущен", me.get("username") or me.get("name"), me.get("user_id"))
+        try:
+            subs = await self.api.subscriptions()
+        except MaxApiError:
+            subs = []
+        if subs:
+            log.error("У бота настроен webhook (%d шт.) — MAX не отдаёт события через polling. "
+                      "Удалите подписку в кабинете MAX или через DELETE /subscriptions.", len(subs))
 
     async def reminders(self) -> None:
         while True:

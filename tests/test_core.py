@@ -156,3 +156,10 @@ def test_reminders(svc):
     assert [k for k, _ in due] == ["2h"]
     mark_reminder_sent(svc, b.id, "2h")
     assert reminders_due(svc, datetime(2026, 11, 17, 8, 40, tzinfo=TZ)) == []
+
+
+def test_max_tls_verifies_certificates():
+    import ssl
+    from adapters.max.client import tls_context
+    ctx = tls_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname

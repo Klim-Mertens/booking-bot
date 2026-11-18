@@ -11,12 +11,24 @@ platform-api2.max.ru.
 from __future__ import annotations
 
 import logging
+import ssl
 from typing import Any
 
 import aiohttp
+import certifi
 
 API_URL = "https://platform-api2.max.ru"
 log = logging.getLogger("booking.max")
+
+
+def tls_context() -> ssl.SSLContext:
+    """Проверка сертификата по набору корневых сертификатов certifi.
+
+    Python с python.org на macOS не видит системные сертификаты, пока не запущен
+    «Install Certificates.command», и тогда любое HTTPS-соединение падает.
+    aiogram поэтому тоже берёт certifi — делаем так же, проверку не отключаем.
+    """
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 class MaxApiError(Exception):
@@ -46,7 +58,7 @@ class MaxClient:
     async def _request(self, method: str, path: str, *, params: dict | None = None,
                        json: dict | None = None, timeout: float = 35) -> Any:
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=tls_context()))
         async with self._session.request(method, API_URL + path, params=params, json=json,
                                          headers=self._headers,
                                          timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
@@ -62,6 +74,15 @@ class MaxClient:
         if buttons:
             body["attachments"].append(keyboard(buttons))
         return await self._request("POST", "/messages", params={"user_id": user_id}, json=body)
+
+    async def me(self) -> dict[str, Any]:
+        """Кто я: проверка токена при запуске."""
+        return await self._request("GET", "/me", timeout=15)
+
+    async def subscriptions(self) -> list[dict[str, Any]]:
+        """Webhook-подписки. Если есть хоть одна, MAX не отдаёт события через polling."""
+        data = await self._request("GET", "/subscriptions", timeout=15)
+        return (data or {}).get("subscriptions") or []
 
     async def answer_callback(self, callback_id: str, notification: str | None = None) -> Any:
         body = {"notification": notification} if notification else {}
