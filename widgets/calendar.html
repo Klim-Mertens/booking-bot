@@ -1,0 +1,72 @@
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:10px 12px;font-family:system-ui,sans-serif;color:var(--tg-theme-text-color);background:var(--tg-theme-bg-color)}
+h3{margin:0 0 2px;font-size:16px}
+.sub{color:var(--tg-theme-hint-color);font-size:13px;margin-bottom:10px}
+.days{display:flex;gap:6px;overflow:hidden;margin-bottom:10px}
+.day{flex:1;padding:6px 0;border-radius:10px;text-align:center;font-size:13px;background:var(--tg-theme-secondary-bg-color)}
+.day b{display:block;font-size:15px}
+.day.on{background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color)}
+.day.off{opacity:.35}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.t{padding:9px 0;border-radius:10px;text-align:center;font-size:14px;border:1px solid var(--tg-theme-section-separator-color)}
+.t.on{background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color);border-color:transparent}
+.msg{margin-top:10px;font-size:13px;min-height:18px;color:var(--tg-theme-hint-color)}
+.err{color:var(--tg-theme-destructive-text-color)}
+</style>
+<h3 id="h">Выберите время</h3>
+<div class="sub" id="sub"></div>
+<div class="days" id="days"></div>
+<div class="grid" id="grid"></div>
+<div class="msg" id="msg"></div>
+<script>
+// Виджет только рисует то, что прислал бот (chat_data), и отправляет боту
+// выбор в виде "s:<номер дня>:<минуты>". Все проверки делает бот:
+// данным из виджета он не доверяет.
+var W = window.TelegramWidget, st = null, cur = 0, busy = false;
+var $ = function (id) { return document.getElementById(id); };
+function hm(m) { var h = Math.floor(m / 60), mm = m % 60; return h + ':' + (mm < 10 ? '0' : '') + mm; }
+// Только textContent, никакого innerHTML: так в виджет невозможно внедрить разметку (XSS).
+function el(tag, cls, text) { var e = document.createElement(tag); e.className = cls; e.textContent = text; return e; }
+function load() {
+  st = null;
+  try { st = JSON.parse(W.chatData); } catch (e) {}
+  if (!st || !st.d) { $('msg').textContent = 'Загрузка…'; return; }
+  if (st.d[cur] && !st.d[cur][2].length) cur = st.d.findIndex(function (d) { return d[2].length; });
+  if (cur < 0) cur = 0;
+  render();
+}
+function render() {
+  $('sub').textContent = st.t;
+  if (st.ok) { $('h').textContent = 'Время выбрано ✓'; $('days').textContent = $('grid').textContent = ''; $('msg').textContent = st.ok; return; }
+  var days = $('days'), grid = $('grid');
+  days.textContent = ''; grid.textContent = '';
+  st.d.forEach(function (d, i) {
+    // d = [день недели, число, [минуты от полуночи...]]
+    var b = el('div', 'day' + (i === cur ? ' on' : '') + (d[2].length ? '' : ' off'), d[0]);
+    b.appendChild(el('b', '', d[1]));
+    if (d[2].length) b.addEventListener('click', function () { cur = i; tap('selectionChanged'); render(); });
+    days.appendChild(b);
+  });
+  var slots = st.d[cur] ? st.d[cur][2] : [];
+  if (!slots.length) grid.appendChild(el('div', 'msg', 'Нет свободного времени'));
+  slots.forEach(function (m) {
+    var t = el('div', 't', hm(m));
+    t.addEventListener('click', function () { pick(m, t); });
+    grid.appendChild(t);
+  });
+}
+function tap(kind) { try { W.HapticFeedback[kind](kind === 'notificationOccurred' ? 'error' : undefined); } catch (e) {} }
+function pick(m, node) {
+  if (busy) return;
+  busy = true; node.className = 't on'; $('msg').className = 'msg'; $('msg').textContent = 'Проверяем…';
+  W.request('s:' + cur + ':' + m).then(function (a) {
+    busy = false;
+    var r = {}; try { r = JSON.parse(a.result); } catch (e) {}
+    if (r.ok) { try { W.HapticFeedback.notificationOccurred('success'); } catch (e) {} $('msg').textContent = 'Отлично! Продолжим в чате ↓'; }
+    else { fail(r.err || 'Время недоступно, выберите другое'); }
+  }, function (e) { busy = false; fail(e.code === 'RATE_LIMITED' ? 'Слишком часто, подождите' : 'Нет связи, попробуйте ещё раз'); });
+}
+function fail(t) { try { W.HapticFeedback.notificationOccurred('error'); } catch (e) {} $('msg').className = 'msg err'; $('msg').textContent = t; render(); }
+if (W) { W.onEvent('chatDataChanged', load); load(); }
+</script>

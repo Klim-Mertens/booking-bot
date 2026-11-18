@@ -1,0 +1,45 @@
+# Всё, что меняется под конкретного заказчика, — здесь. Код трогать не нужно.
+# Секреты (токены, ключи) сюда НЕ пишем: только в переменные окружения (.env).
+
+[business]
+name = "Barber Demo"
+address = "ул. Примерная, 1"
+phone = "+7 900 000-00-00"
+timezone = "Europe/Moscow"
+privacy_url = "https://example.com/privacy"   # политика обработки ПДн заказчика
+days_ahead = 7                                 # сколько дней показывать в календаре
+keep_days = 90                                 # через сколько дней удалять прошедшие записи
+
+[[services]]
+id = "haircut"
+title = "Мужская стрижка"
+duration_min = 60
+price_rub = 1500
+
+[[services]]
+id = "beard"
+title = "Оформление бороды"
+duration_min = 30
+price_rub = 800
+
+[[services]]
+id = "combo"
+title = "Стрижка + борода"
+duration_min = 90
+price_rub = 2100
+
+[[masters]]
+id = "anton"
+name = "Антон"
+services = ["haircut", "beard", "combo"]
+work_start = "10:00"
+work_end = "20:00"
+days_off = [6]          # 0 = пн ... 6 = вс
+
+[[masters]]
+id = "ilya"
+name = "Илья"
+services = ["haircut", "combo"]
+work_start = "12:00"
+work_end = "21:00"
+days_off = [0]
