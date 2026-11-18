@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import ssl
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -21,14 +22,22 @@ API_URL = "https://platform-api2.max.ru"
 log = logging.getLogger("booking.max")
 
 
-def tls_context() -> ssl.SSLContext:
-    """Проверка сертификата по набору корневых сертификатов certifi.
+RUSSIAN_CA = Path(__file__).with_name("russiantrustedca.pem")
 
-    Python с python.org на macOS не видит системные сертификаты, пока не запущен
-    «Install Certificates.command», и тогда любое HTTPS-соединение падает.
-    aiogram поэтому тоже берёт certifi — делаем так же, проверку не отключаем.
+
+def tls_context() -> ssl.SSLContext:
+    """TLS-контекст для MAX: проверка сертификата ВКЛЮЧЕНА.
+
+    Сервер MAX (platform-api2.max.ru) предъявляет сертификат, выданный российским
+    удостоверяющим центром Минцифры («Russian Trusted Root/Sub CA»). Его нет ни в
+    certifi, ни в системе macOS, поэтому без него соединение падает с
+    CERTIFICATE_VERIFY_FAILED. Мы добавляем этот центр ТОЛЬКО в контекст соединения
+    с MAX (не в систему и не в Telegram-часть), остальные сертификаты берём из certifi.
+    Тот же файл поставляется с официальной библиотекой maxapi.
     """
-    return ssl.create_default_context(cafile=certifi.where())
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx.load_verify_locations(cafile=str(RUSSIAN_CA))
+    return ctx
 
 
 class MaxApiError(Exception):

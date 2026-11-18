@@ -163,3 +163,9 @@ def test_max_tls_verifies_certificates():
     from adapters.max.client import tls_context
     ctx = tls_context()
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+
+def test_max_tls_trusts_russian_ca_but_still_verifies():
+    from adapters.max.client import tls_context
+    names = " ".join(str(c.get("subject")) for c in tls_context().get_ca_certs())
+    assert "Russian Trusted Root CA" in names and "ISRG Root X1" in names   # и российский, и обычные
