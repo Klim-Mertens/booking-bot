@@ -78,7 +78,7 @@ pip install -r requirements.txt
 cp config.example.toml config.toml   # услуги, мастера, часы работы
 cp .env.example .env                 # токены и ключи (инструкции внутри)
 set -a && source .env && set +a
-python run_telegram.py               # и/или python run_max.py
+python run_all.py                    # оба бота сразу (или run_telegram.py / run_max.py)
 pytest                               # тесты
 ```
 
