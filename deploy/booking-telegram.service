@@ -1,0 +1,32 @@
+[Unit]
+Description=Бот записи — Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bots
+Group=bots
+WorkingDirectory=/opt/bots/booking-bot
+EnvironmentFile=/opt/bots/booking-bot/.env
+ExecStart=/opt/bots/booking-bot/.venv/bin/python run_telegram.py
+Restart=always
+RestartSec=5
+
+# Песочница: процесс не может получить root, не видит /home, пишет только в свою папку
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bots/booking-bot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target
