@@ -31,8 +31,8 @@ def telegram_notifier(token: str | None, admins: frozenset[int]) -> Notifier | N
         for admin_id in admins:
             try:
                 await bot.send_message(admin_id, text)
-            except TelegramAPIError:
-                log.warning("telegram admin notify failed")
+            except TelegramAPIError as e:
+                log.warning("telegram admin notify failed: %s", e)
     return notify
 
 
@@ -48,8 +48,10 @@ def max_notifier(token: str | None, admins: frozenset[int]) -> Notifier | None:
         for admin_id in admins:
             try:
                 await client.send(admin_id, text)
-            except (MaxApiError, OSError):
-                log.warning("max admin notify failed")
+            except (MaxApiError, OSError) as e:
+                # Причина без токена и без текста уведомления. Частая: неверный MAX_ADMIN_IDS
+                # или админ ещё не писал боту в MAX.
+                log.warning("max admin notify failed: %s", e)
     return notify
 
 
