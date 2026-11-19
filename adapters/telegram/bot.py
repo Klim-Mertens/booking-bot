@@ -197,7 +197,7 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int],
                                    reply_markup=ikb([[("Выбрать списком", "nowidget")]]))
         except TelegramAPIError as e:
             # Запасной путь: старый клиент или виджеты недоступны → обычные кнопки.
-            log.info("widget unavailable, fallback to buttons: %s", type(e).__name__)
+            log.warning("виджет недоступен, показываю кнопки: %s: %s", type(e).__name__, e)  # текст ошибки Telegram, без токена
             await send_days(c.message, svc, service_id, master_id, days)
 
     @router.callback_query(Flow.choosing, F.data == "nowidget")
