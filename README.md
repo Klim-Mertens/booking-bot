@@ -82,6 +82,8 @@ python run_all.py                    # оба бота сразу (или run_te
 pytest                               # тесты
 ```
 
+Работа в фоне на Mac без окна Терминала: `sh deploy/mac/install.sh` (остановка: `sh deploy/mac/uninstall.sh`).
+
 Круглосуточная работа на VPS: готовые службы systemd с песочницей (без root, только своя папка,
 лимит памяти) и пошаговая инструкция — в [`deploy/`](deploy/README.md).
 
