@@ -201,3 +201,9 @@ def test_widget_answered_even_on_internal_error(env, monkeypatch):
         assert session.names()[-1] == "answerWidgetQuery"
 
     asyncio.run(scenario())
+
+
+def test_id_command_shows_own_id(env):
+    svc, biz, session, bot, dp = env
+    asyncio.run(feed(bot, dp, msg("/id", user=4321)))
+    assert "4321" in session.calls[-1].text

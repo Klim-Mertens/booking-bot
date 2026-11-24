@@ -144,3 +144,9 @@ def test_admin_notified_in_other_messenger(env):
     bot = MaxBookingBot(api, svc, biz, frozenset({ADMIN}), extra_notify=extra)
     asyncio.run(bot.notify_admins("🆕 Новая запись"))
     assert got == ["🆕 Новая запись"]
+
+
+def test_id_command_shows_own_id(env):
+    svc, biz, api, bot = env
+    asyncio.run(bot.handle(text("/id", user=1234)))
+    assert api.sent[-1][0] == 1234 and "1234" in api.sent[-1][1]

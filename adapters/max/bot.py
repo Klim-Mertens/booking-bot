@@ -105,6 +105,10 @@ class MaxBookingBot:
     async def on_message(self, user_id: int, body: dict[str, Any]) -> None:
         s = self.session(user_id)
         text = (body.get("text") or "").strip()
+        if text.lower() in ("/id", "id"):
+            # Свой ID нужен, чтобы вписать его в MAX_ADMIN_IDS. Это не секрет.
+            await self.api.send(user_id, f"Ваш ID в MAX: {user_id}")
+            return
         if s.step == "name" and text:
             name = " ".join(text.split())[:64]
             if name.startswith("/"):

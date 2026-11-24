@@ -121,6 +121,11 @@ def build(svc: BookingService, biz: Business, admins: frozenset[int],
         await m.answer(f"Здравствуйте! Это бот записи в <b>{escape(biz.name)}</b>.\n"
                        "Запишитесь за минуту, а мы напомним о визите.", reply_markup=main_kb())
 
+    @router.message(Command("id"))
+    async def my_id(m: Message) -> None:
+        # Свой числовой ID нужен, чтобы вписать его в ADMIN_IDS. Это не секрет.
+        await m.answer(f"Ваш ID в Telegram: {m.from_user.id}", parse_mode=None)
+
     @router.message(F.text == BTN_CONTACTS)
     async def contacts(m: Message) -> None:
         await m.answer(f"<b>{escape(biz.name)}</b>\n{escape(biz.address)}\n{escape(biz.phone)}",
