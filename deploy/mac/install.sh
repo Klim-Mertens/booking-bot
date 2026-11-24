@@ -8,6 +8,13 @@ LABEL="com.klim.booking-bot"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/booking-bot.log"
 
+case "$DIR" in
+  "$HOME"/Documents/*|"$HOME"/Desktop/*|"$HOME"/Downloads/*)
+    echo "Папка бота лежит в «Документах/Рабочем столе/Загрузках». macOS не даёт фоновым службам читать эти папки"
+    echo "(ошибка «Operation not permitted»). Перенесите бота в ~/bots, команды в deploy/mac/README.md."
+    exit 1;;
+esac
+
 [ -f "$DIR/.env" ] || { echo "Нет файла .env в $DIR. Сначала заполните его (README, шаг «Запуск»)."; exit 1; }
 [ -x "$DIR/.venv/bin/python3" ] || { echo "Нет окружения .venv. Выполните: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"; exit 1; }
 
